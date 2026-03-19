@@ -193,7 +193,8 @@ class BiSeNet(nn.Module):
     def __init__(self, n_classes=19):
         super().__init__()
         self.cp = ContextPath()
-        # No SpatialPath in this variant – FFM fuses feat_cp8 (128ch) with itself
+        # No SpatialPath – raw resnet feat8 replaces spatial features,
+        # fused with ARM-processed context feat via FFM (128+128=256ch)
         self.ffm = FeatureFusionModule(256, 256)
         self.conv_out = BiSeNetOutput(256, 256, n_classes)
         self.conv_out16 = BiSeNetOutput(128, 64, n_classes)
@@ -201,12 +202,12 @@ class BiSeNet(nn.Module):
 
     def forward(self, x):
         H, W = x.shape[2:]
-        feat_cp8, feat_cp16, feat_cp32 = self.cp(x)
-        feat_fuse = self.ffm(feat_cp8, feat_cp8)
+        feat_res8, feat_cp8, feat_cp16 = self.cp(x)
+        feat_fuse = self.ffm(feat_res8, feat_cp8)
         feat_out = self.conv_out(feat_fuse)
         feat_out = F.interpolate(feat_out, size=(H, W), mode="bilinear", align_corners=True)
-        feat_out16 = self.conv_out16(feat_cp16)
-        feat_out32 = self.conv_out32(feat_cp32)
+        feat_out16 = self.conv_out16(feat_cp8)
+        feat_out32 = self.conv_out32(feat_cp16)
         return feat_out, feat_out16, feat_out32
 
 
