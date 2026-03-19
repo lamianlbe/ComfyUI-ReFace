@@ -409,6 +409,52 @@ def _poisson_blend(src_rgb, dst_rgb, mask):
         return src_rgb
 
 
+def _wavelet_color_transfer(src_rgb, ref_rgb, mask):
+    """Wavelet-based color transfer: use low-frequency color from ref and
+    high-frequency detail from src.
+
+    Decomposes both images into low-freq (Gaussian blur) and high-freq
+    (detail = original - low_freq) components. Reconstructs by combining
+    ref's low-freq color with src's high-freq detail.
+
+    Args:
+        src_rgb: Modified head region (H, W, 3) uint8 RGB.
+        ref_rgb: Original dst region (H, W, 3) uint8 RGB.
+        mask: Binary mask (H, W) uint8, 0 or 255.
+
+    Returns:
+        Color-corrected src (H, W, 3) uint8 RGB.
+    """
+    import cv2
+
+    mask_bool = mask > 127
+    if mask_bool.sum() < 10:
+        return src_rgb
+
+    src_f = src_rgb.astype(np.float32)
+    ref_f = ref_rgb.astype(np.float32)
+
+    # Gaussian blur as low-frequency decomposition
+    # Kernel size proportional to image size for scale-invariance
+    ksize = max(3, min(src_f.shape[0], src_f.shape[1]) // 8)
+    ksize = ksize if ksize % 2 == 1 else ksize + 1
+
+    src_low = cv2.GaussianBlur(src_f, (ksize, ksize), 0)
+    ref_low = cv2.GaussianBlur(ref_f, (ksize, ksize), 0)
+
+    # High-frequency detail from src
+    src_high = src_f - src_low
+
+    # Reconstruct: ref's low-freq color + src's high-freq detail
+    result = ref_low + src_high
+
+    # Only apply within the mask, keep src outside
+    mask_3d = mask_bool[:, :, np.newaxis].astype(np.float32)
+    result = result * mask_3d + src_f * (1 - mask_3d)
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
 # Class types that should stop the upstream trace (other loop boundaries).
 _LOOP_END_CLASSES = frozenset([
     "ReFaceLoopEnd",
@@ -431,7 +477,7 @@ class ReFaceLoopEnd:
             "required": {
                 "flow": ("FLOW_CONTROL", {"rawLink": True}),
                 "loop_ctx": ("REFACE_LOOP_CTX",),
-                "blend_mode": (["direct", "poisson", "color_match"],
+                "blend_mode": (["direct", "poisson", "color_match", "wavelet"],
                                {"default": "direct"}),
             },
             "optional": {
@@ -544,6 +590,10 @@ class ReFaceLoopEnd:
         if blend_mode == "color_match" and mask_np is not None:
             # Lab color transfer: match modified region's color stats to original
             mod_np = _lab_color_transfer(mod_np, dst_region, mask_np)
+
+        if blend_mode == "wavelet" and mask_np is not None:
+            # Wavelet: ref low-freq color + src high-freq detail
+            mod_np = _wavelet_color_transfer(mod_np, dst_region, mask_np)
 
         if blend_mode == "poisson" and mask_np is not None:
             # Poisson blending (seamless clone)
