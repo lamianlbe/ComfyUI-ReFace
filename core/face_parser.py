@@ -1,6 +1,6 @@
 """Sapiens body-part segmentation for head mask extraction.
 
-Uses Meta's Sapiens 0.3B model (TorchScript, bf16 inference) for
+Uses Meta's Sapiens 0.3B model (native bf16, torch.export) for
 high-resolution (1024×768) human body-part segmentation.
 From: https://github.com/facebookresearch/sapiens
 
@@ -38,10 +38,10 @@ _parser_model = None
 _device = None
 
 SAPIENS_MODEL_DIR = "reface"
-SAPIENS_MODEL_NAME = "sapiens_0.3b_goliath_best_goliath_mIoU_7673_epoch_194_torchscript.pt2"
+SAPIENS_MODEL_NAME = "sapiens_0.3b_goliath_best_goliath_mIoU_7673_epoch_194_bfloat16.pt2"
 SAPIENS_MODEL_URL = (
-    "https://huggingface.co/facebook/sapiens-seg-0.3b-torchscript/resolve/main/"
-    "sapiens_0.3b_goliath_best_goliath_mIoU_7673_epoch_194_torchscript.pt2"
+    "https://huggingface.co/facebook/sapiens-seg-0.3b-bfloat16/resolve/main/"
+    "sapiens_0.3b_goliath_best_goliath_mIoU_7673_epoch_194_bfloat16.pt2"
 )
 
 
@@ -74,9 +74,9 @@ def _download_sapiens():
     if os.path.isfile(model_path):
         return model_path
 
-    print(f"[ReFace] Downloading Sapiens 0.3B segmentation model to {model_path} ...")
+    print(f"[ReFace] Downloading Sapiens 0.3B bf16 segmentation model to {model_path} ...")
     print(f"[ReFace] URL: {SAPIENS_MODEL_URL}")
-    print("[ReFace] This is ~1.3GB, please wait...")
+    print("[ReFace] This is ~650MB, please wait...")
 
     import urllib.request
     urllib.request.urlretrieve(SAPIENS_MODEL_URL, model_path)
@@ -93,15 +93,20 @@ def get_face_parser():
     model_path = _download_sapiens()
     device = _get_device()
 
-    model = torch.jit.load(model_path, map_location=device)
+    # Load native bf16 torch.export model
+    model = torch.export.load(model_path).module()
+    model = model.to(device)
     model.eval()
 
-    # Cast to bf16 if supported for faster inference
-    if _supports_bf16(device):
-        model = model.to(dtype=torch.bfloat16)
-        print(f"[ReFace] Sapiens 0.3B loaded on {device} (bfloat16)")
-    else:
-        print(f"[ReFace] Sapiens 0.3B loaded on {device} (float32)")
+    dtype_str = "bfloat16"
+
+    # Apply torch.compile for fused ops and faster inference
+    # First run will be slow (compilation), subsequent runs are fast
+    try:
+        model = torch.compile(model, mode="max-autotune")
+        print(f"[ReFace] Sapiens 0.3B loaded on {device} ({dtype_str}, compiled)")
+    except Exception as e:
+        print(f"[ReFace] Sapiens 0.3B loaded on {device} ({dtype_str}, torch.compile failed: {e})")
 
     _parser_model = model
     return _parser_model
@@ -148,14 +153,11 @@ def parse_head_mask(
     device = _get_device()
     h, w = image_rgb.shape[:2]
 
-    # Preprocess
-    tensor = _preprocess(image_rgb).to(device)
+    # Preprocess and cast to bf16 (model is native bf16)
+    tensor = _preprocess(image_rgb).to(device=device, dtype=torch.bfloat16)
 
-    # Run inference with bf16 if model is bf16
-    use_bf16 = _supports_bf16(device) and next(model.parameters()).dtype == torch.bfloat16
+    # Run inference
     with torch.no_grad():
-        if use_bf16:
-            tensor = tensor.to(dtype=torch.bfloat16)
         output = model(tensor)
 
     # Model returns a list; take first element
