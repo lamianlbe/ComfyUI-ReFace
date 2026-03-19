@@ -545,13 +545,16 @@ class ReFaceLoopEnd:
         mod = modified_head_image[0]  # (h, w, C)
 
         # Resize modified image to target bbox size
+        # Use 'area' for downscaling (sharper), 'bicubic' for upscaling
         if mod.shape[0] != target_h or mod.shape[1] != target_w:
+            is_downscale = (mod.shape[0] > target_h) or (mod.shape[1] > target_w)
+            mode = "area" if is_downscale else "bicubic"
             mod = (
                 torch.nn.functional.interpolate(
                     mod.permute(2, 0, 1).unsqueeze(0),
                     size=(target_h, target_w),
-                    mode="bilinear",
-                    align_corners=False,
+                    mode=mode,
+                    **({} if mode == "area" else {"align_corners": False}),
                 )
                 .squeeze(0)
                 .permute(1, 2, 0)
