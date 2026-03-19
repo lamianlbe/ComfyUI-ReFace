@@ -94,15 +94,12 @@ def get_face_parser():
     device = _get_device()
 
     # Load TorchScript model — instant load, no compilation needed
+    # Keep model in fp32; use autocast for bf16 inference (safer for TorchScript)
     model = torch.jit.load(model_path, map_location=device)
     model.eval()
 
-    _use_bf16 = _supports_bf16(device)
-    if _use_bf16:
-        model = model.to(dtype=torch.bfloat16)
-        print(f"[ReFace] Sapiens 0.3B loaded on {device} (bfloat16)")
-    else:
-        print(f"[ReFace] Sapiens 0.3B loaded on {device} (float32)")
+    dtype_msg = "bf16 autocast" if _supports_bf16(device) else "float32"
+    print(f"[ReFace] Sapiens 0.3B loaded on {device} ({dtype_msg})")
 
     _parser_model = model
     return _parser_model
@@ -152,14 +149,15 @@ def parse_head_mask(
     # Preprocess
     tensor = _preprocess(image_rgb).to(device)
 
-    # Run inference with bf16 autocast if supported
-    use_bf16 = _supports_bf16(device)
+    # Run inference with bf16 autocast for speed (model stays fp32 for stability)
     with torch.no_grad():
-        if use_bf16:
-            tensor = tensor.to(dtype=torch.bfloat16)
-        output = model(tensor)
+        if _supports_bf16(device):
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                output = model(tensor)
+        else:
+            output = model(tensor)
 
-    # Model returns a list; take first element
+    # Output is a single tensor [1, 28, H', W']
     result = output[0] if isinstance(output, (list, tuple)) else output
 
     # Ensure 4D: (1, C, H, W)
