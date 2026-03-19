@@ -6,11 +6,11 @@ ReFaceLoopEnd    – pastes modified head back, advances the loop index.
 Loop mechanism follows the ComfyUI execution-inversion pattern:
   * LoopStart acts as the "open" node (outputs FLOW_CONTROL).
   * LoopEnd acts as the "close" node (graph expansion for next iteration).
-  * Loop-carried variables (_loop_ctx, _loop_dst_image) are passed through
-    hidden inputs that LoopEnd sets when expanding the graph.
+  * Loop-carried variable (_loop_ctx) is passed through a hidden input
+    that LoopEnd sets when expanding the graph. dst_image is stored
+    inside loop_ctx so no separate wire is needed.
 """
 
-import copy
 import numpy as np
 import torch
 
@@ -65,14 +65,13 @@ class ReFaceLoopStart:
     """Preprocess faces, match src↔dst, then loop over each matched pair.
 
     **First iteration** (_loop_ctx is None):
-      1. YOLO26x-seg → human instance masks on *dst_image*.
-      2. InsightFace → detect all faces in *dst_image*, keep top-N.
-      3. ArcFace embeddings for both src and dst faces (skipped when
-         only 1 src face and 1 person detected).
-      4. Greedy matching: largest dst_face picks most-similar src_face.
-      5. For each match: human instance mask → BiSeNet head parse → fill
-         holes → compute bbox → size threshold check.
-      6. Build items array and start iteration.
+      1. Filter None src_face inputs.
+      2. YOLO26x-seg → human instance masks on *dst_image*.
+      3. InsightFace → detect all faces in *dst_image*, keep top-N by area.
+      4. ArcFace matching (skipped when 1 src + 1 person).
+      5. Run LIP + Pascal on the full image once (union).
+      6. Per match: intersect head mask with instance mask → bbox → threshold.
+      7. Build items array and start iteration.
 
     **Subsequent iterations** (_loop_ctx is provided by LoopEnd):
       Skip all heavy computation; just output the current item's data.
@@ -94,9 +93,8 @@ class ReFaceLoopStart:
             },
             "optional": {},
             "hidden": {
-                # Loop-carried variables (set by ReFaceLoopEnd on iterations > 0)
+                # Loop-carried variable (set by ReFaceLoopEnd on iterations > 0)
                 "_loop_ctx": (any_type,),
-                "_loop_dst_image": ("IMAGE",),
                 "unique_id": "UNIQUE_ID",
             },
         }
@@ -104,10 +102,10 @@ class ReFaceLoopStart:
             inputs["optional"][f"src_face_{i}"] = ("REFACE_DETECTION",)
         return inputs
 
-    RETURN_TYPES = ("FLOW_CONTROL", "REFACE_LOOP_CTX", "IMAGE",
+    RETURN_TYPES = ("FLOW_CONTROL", "REFACE_LOOP_CTX",
                     "IMAGE", "MASK",
                     "IMAGE", "BOOLEAN")
-    RETURN_NAMES = ("flow", "loop_ctx", "dst_image",
+    RETURN_NAMES = ("flow", "loop_ctx",
                     "dst_head_image", "dst_head_mask",
                     "src_face_image", "has_data")
     FUNCTION = "execute"
@@ -117,28 +115,26 @@ class ReFaceLoopStart:
 
     def execute(self, dst_image, bbox_expand_pixels, min_bbox_ratio, **kwargs):
         loop_ctx = kwargs.get("_loop_ctx", None)
-        loop_dst_image = kwargs.get("_loop_dst_image", None)
 
         if loop_ctx is None:
             # ── First iteration: heavy preprocessing ──
             src_faces = self._collect_src_faces(kwargs)
             if not src_faces:
-                ctx = {"items": [], "current_index": 0}
+                ctx = {"items": [], "current_index": 0, "dst_image": dst_image}
             else:
                 ctx = self._preprocess(dst_image, src_faces,
                                        bbox_expand_pixels, min_bbox_ratio)
-            current_dst = dst_image
         else:
             # ── Subsequent iteration: reuse context ──
             ctx = loop_ctx
-            current_dst = loop_dst_image
 
+        current_dst = ctx["dst_image"]
         idx = ctx["current_index"]
         items = ctx["items"]
 
         if idx >= len(items):
-            # Nothing (left) to process → placeholder outputs
-            return self._empty_outputs(ctx, current_dst)
+            # Nothing (left) to process → block processing outputs
+            return self._empty_outputs(ctx)
 
         item = items[idx]
         bbox = item["dst_head_bbox"]
@@ -159,7 +155,7 @@ class ReFaceLoopStart:
         # Src face image
         src_face_image = item["src_face"]["face"]  # IMAGE tensor
 
-        return ("stub", ctx, current_dst,
+        return ("stub", ctx,
                 dst_head_image, mask_tensor,
                 src_face_image, True)
 
@@ -176,13 +172,13 @@ class ReFaceLoopStart:
         return faces
 
     @staticmethod
-    def _empty_outputs(ctx, dst_image):
+    def _empty_outputs(ctx):
         """Return ExecutionBlocker for processing outputs so that nodes
         between LoopStart and LoopEnd are skipped entirely.
-        Non-processing outputs (flow, loop_ctx, dst_image) remain valid
+        Non-processing outputs (flow, loop_ctx) remain valid
         so that LoopEnd can still execute and return dst_image as-is."""
         blocker = ExecutionBlocker(None)
-        return ("stub", ctx, dst_image,
+        return ("stub", ctx,
                 blocker, blocker,          # dst_head_image, dst_head_mask
                 blocker, False)            # src_face_image, has_data
 
@@ -202,7 +198,7 @@ class ReFaceLoopStart:
         from ..core.face_detector import detect_all_faces, compute_embedding_from_image
         dst_faces = detect_all_faces(img_bgr, max_count=len(src_faces))
         if not dst_faces:
-            return {"items": [], "current_index": 0}
+            return {"items": [], "current_index": 0, "dst_image": dst_image}
 
         # ── Step 4: Matching ──
         only_one_src = len(src_faces) == 1
@@ -222,7 +218,7 @@ class ReFaceLoopStart:
             matches = self._match_faces(dst_faces, src_embeddings)
 
         if not matches:
-            return {"items": [], "current_index": 0}
+            return {"items": [], "current_index": 0, "dst_image": dst_image}
 
         # ── Step 5: Run LIP + Pascal on the FULL image once ──
         from ..core.face_parser import parse_head_mask
@@ -281,7 +277,7 @@ class ReFaceLoopStart:
                 "src_face": src_face,
             })
 
-        return {"items": items, "current_index": 0}
+        return {"items": items, "current_index": 0, "dst_image": dst_image}
 
     # ── face matching ─────────────────────────────────────────────────────
 
@@ -358,7 +354,6 @@ class ReFaceLoopEnd:
             "required": {
                 "flow": ("FLOW_CONTROL", {"rawLink": True}),
                 "loop_ctx": ("REFACE_LOOP_CTX",),
-                "dst_image": ("IMAGE",),
             },
             "optional": {
                 # Optional so that LoopEnd still executes when LoopStart
@@ -378,10 +373,11 @@ class ReFaceLoopEnd:
 
     # ── public entry point ────────────────────────────────────────────────
 
-    def execute(self, flow, loop_ctx, dst_image,
+    def execute(self, flow, loop_ctx,
                 modified_head_image=None, dynprompt=None, unique_id=None):
         items = loop_ctx.get("items", [])
         idx = loop_ctx.get("current_index", 0)
+        dst_image = loop_ctx["dst_image"]
 
         # Nothing to process, or no modified image provided → return as-is
         if not items or idx >= len(items) or modified_head_image is None:
@@ -390,16 +386,17 @@ class ReFaceLoopEnd:
         # ── Paste modified head back onto dst_image ──
         updated_dst = self._paste_back(dst_image, modified_head_image, items[idx])
 
-        # ── Advance index ──
-        new_ctx = dict(loop_ctx)  # shallow copy (items list is immutable)
+        # ── Advance index and update dst_image in context ──
+        new_ctx = dict(loop_ctx)
         new_ctx["current_index"] = idx + 1
+        new_ctx["dst_image"] = updated_dst
 
         # ── Done? ──
         if new_ctx["current_index"] >= len(items):
             return (updated_dst,)
 
         # ── More items → expand graph for next iteration ──
-        return self._expand_loop(flow, new_ctx, updated_dst, dynprompt, unique_id)
+        return self._expand_loop(flow, new_ctx, dynprompt, unique_id)
 
     # ── paste logic ───────────────────────────────────────────────────────
 
@@ -443,7 +440,7 @@ class ReFaceLoopEnd:
 
     # ── graph expansion (execution-inversion loop) ────────────────────────
 
-    def _expand_loop(self, flow, new_ctx, updated_dst, dynprompt, unique_id):
+    def _expand_loop(self, flow, new_ctx, dynprompt, unique_id):
         """Clone the sub-graph between LoopStart and this LoopEnd for the
         next iteration, wiring updated loop-carried variables."""
         graph = GraphBuilder()
@@ -494,10 +491,9 @@ class ReFaceLoopEnd:
                 else:
                     n.set_input(k, v)
 
-        # 6. Override loop-carried variables on the cloned LoopStart
+        # 6. Override loop-carried variable on the cloned LoopStart
         new_open = graph.lookup_node(open_node)
         new_open.set_input("_loop_ctx", new_ctx)
-        new_open.set_input("_loop_dst_image", updated_dst)
 
         # 7. Return from the cloned LoopEnd
         my_clone = graph.lookup_node("Recurse")
