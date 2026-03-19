@@ -194,43 +194,42 @@ class ReFaceLoopStart:
         H, W = img_np.shape[:2]
         img_bgr = img_np[:, :, ::-1].copy()
 
-        # ── Step 1: YOLO human instance segmentation ──
+        # ── Step 2: YOLO human instance segmentation ──
         from ..core.human_segmentor import segment_humans, find_human_containing_point
         humans = segment_humans(img_np)
 
-        # ── Step 2: InsightFace detect all dst faces ──
+        # ── Step 3: InsightFace detect all dst faces, sorted by area desc ──
         from ..core.face_detector import detect_all_faces, compute_embedding_from_image
         dst_faces = detect_all_faces(img_bgr, max_count=len(src_faces))
         if not dst_faces:
             return {"items": [], "current_index": 0}
 
-        # ── Step 3 & 4a: matching ──
+        # ── Step 4: Matching ──
         only_one_src = len(src_faces) == 1
         only_one_human = len(humans) <= 1
         skip_arcface = only_one_src and only_one_human
 
         if skip_arcface:
-            # Optimisation: direct 1-to-1 pairing
             matches = [(0, 0)]
         else:
-            # Compute src embeddings
             src_embeddings = []
             for sf in src_faces:
                 emb = sf.get("embedding", None)
                 if emb is None:
-                    # Fallback: compute from the cropped face image
                     face_np = self._detection_to_bgr(sf)
                     emb = compute_embedding_from_image(face_np) if face_np is not None else None
                 src_embeddings.append(emb)
-
             matches = self._match_faces(dst_faces, src_embeddings)
 
         if not matches:
             return {"items": [], "current_index": 0}
 
-        # ── Step 4b-c: head parsing & bbox for each match ──
-        from ..core.face_parser import parse_head_mask, _fill_holes
+        # ── Step 5: Run LIP + Pascal on the FULL image once ──
+        from ..core.face_parser import parse_head_mask
 
+        full_head_mask = parse_head_mask(img_np, instance_mask=None)
+
+        # ── Step 6: Per-match: intersect with instance mask → bbox ──
         items = []
         for dst_idx, src_idx in matches:
             dst_face = dst_faces[dst_idx]
@@ -238,18 +237,20 @@ class ReFaceLoopStart:
             cx, cy = dst_face["center"]
 
             # Find human instance containing this face
-            instance_mask = None
             if humans:
                 human = find_human_containing_point(humans, cx, cy)
-                if human is not None:
-                    instance_mask = human["mask"]
-                else:
-                    # No human instance at face center → discard
+                if human is None:
                     continue
+                instance_mask = human["mask"]
+            else:
+                continue
 
-            # Head parsing constrained to the instance
-            head_mask = parse_head_mask(img_np, instance_mask=instance_mask)
-            head_mask = _fill_holes(head_mask)
+            # Intersect full head mask with this person's instance mask
+            inst = instance_mask.astype(np.uint8)
+            if inst.max() == 1:
+                inst = inst * 255
+            head_mask = full_head_mask.copy()
+            head_mask[inst == 0] = 0
 
             # Compute bbox
             ys, xs = np.where(head_mask > 0)
