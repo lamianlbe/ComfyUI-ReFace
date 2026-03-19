@@ -1,12 +1,14 @@
 """SCHP (Self-Correction Human Parsing) for head segmentation.
 
-Uses the SCHP model with Pascal-Person-Part dataset for full-body head parsing.
-Model: exp-schp-201908270938-pascal-person-part.pth
+Uses the SCHP model with LIP dataset for full-body head parsing.
+Model: exp-schp-201908261155-lip.pth
 From: https://github.com/GoGoDuck912/Self-Correction-Human-Parsing
 
-Pascal-Person-Part label map:
-  0: Background, 1: Head, 2: Torso, 3: Upper Arms,
-  4: Lower Arms, 5: Upper Legs, 6: Lower Legs
+LIP label map (20 classes):
+  0: Background, 1: Hat, 2: Hair, 3: Glove, 4: Sunglasses,
+  5: Upper-clothes, 6: Dress, 7: Coat, 8: Socks, 9: Pants,
+  10: Jumpsuits, 11: Scarf, 12: Skirt, 13: Face, 14: Left-arm,
+  15: Right-arm, 16: Left-leg, 17: Right-leg, 18: Left-shoe, 19: Right-shoe
 """
 
 import os
@@ -20,16 +22,18 @@ from collections import OrderedDict
 
 import folder_paths
 
-# Head label in Pascal-Person-Part
-HEAD_LABEL = 1
+# Head labels in LIP: Hat(1) + Hair(2) + Sunglasses(4) + Face(13)
+HEAD_LABELS = {1, 2, 4, 13}
 
-SCHP_INPUT_SIZE = [512, 512]
+SCHP_INPUT_SIZE = [473, 473]
+SCHP_NUM_CLASSES = 20
 
 _parser_model = None
 _device = None
 
-SCHP_MODEL_DIR = "schp"
-SCHP_MODEL_NAME = "exp-schp-201908270938-pascal-person-part.pth"
+SCHP_MODEL_DIR = "reface"
+SCHP_MODEL_NAME = "exp-schp-201908261155-lip.pth"
+SCHP_MODEL_URL = "https://drive.google.com/uc?id=1k4dllHpu0bdx38J7H28rVVLpU-kOHmnH"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -391,15 +395,15 @@ def get_face_parser():
 
     if not os.path.isfile(model_path):
         raise FileNotFoundError(
-            f"[ReFace] SCHP Pascal-Person-Part model not found at {model_path}.\n"
+            f"[ReFace] SCHP LIP model not found at {model_path}.\n"
             f"Please download it from:\n"
-            f"  https://drive.google.com/file/d/1E5YwNKW2VOEayK9mWCS3Kpsxf-3z04ZE/view\n"
+            f"  https://drive.google.com/file/d/1k4dllHpu0bdx38J7H28rVVLpU-kOHmnH/view\n"
             f"Place as {model_path}"
         )
 
     device = _get_device()
 
-    net = _build_schp_model(num_classes=7)
+    net = _build_schp_model(num_classes=SCHP_NUM_CLASSES)
 
     state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
     if 'state_dict' in state_dict:
@@ -416,7 +420,7 @@ def get_face_parser():
     net.eval()
 
     _parser_model = net
-    print(f"[ReFace] SCHP Pascal-Person-Part model loaded on {device}")
+    print(f"[ReFace] SCHP LIP model loaded on {device}")
     return _parser_model
 
 
@@ -474,8 +478,10 @@ def parse_head_mask(
     )
     parsing = np.argmax(logits, axis=2)
 
-    # Head mask: label == 1
-    head_mask = np.where(parsing == HEAD_LABEL, 255, 0).astype(np.uint8)
+    # Head mask: combine Hat(1) + Hair(2) + Sunglasses(4) + Face(13)
+    head_mask = np.zeros((h, w), dtype=np.uint8)
+    for label in HEAD_LABELS:
+        head_mask[parsing == label] = 255
 
     # Intersect with instance mask if provided
     if instance_mask is not None:
