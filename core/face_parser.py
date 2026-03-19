@@ -404,12 +404,40 @@ def parse_head_mask(
     return head_mask
 
 
-def _fill_holes(mask: np.ndarray) -> np.ndarray:
-    """Fill holes inside the mask using contour-based approach."""
+def _fill_holes(mask: np.ndarray, expand_ratio: float = 0.05) -> np.ndarray:
+    """Fill holes and expand the mask outward.
+
+    Args:
+        mask: Binary mask (H, W), uint8, 0 or 255.
+        expand_ratio: Expand the mask by this fraction of its bounding box diagonal.
+            Default 0.05 (5%).
+
+    Returns:
+        Processed binary mask (H, W), uint8, 0 or 255.
+    """
+    if mask.max() == 0:
+        return mask
+
+    # Morphological closing to connect nearby regions
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+
+    # Fill holes: find contours and fill
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     filled = np.zeros_like(mask)
     if contours:
         cv2.drawContours(filled, contours, -1, 255, cv2.FILLED)
+
+    # Expand mask outward by expand_ratio of bbox diagonal
+    if expand_ratio > 0:
+        ys, xs = np.where(filled > 0)
+        if len(ys) > 0:
+            bbox_w = xs.max() - xs.min()
+            bbox_h = ys.max() - ys.min()
+            diag = np.sqrt(bbox_w ** 2 + bbox_h ** 2)
+            expand_px = max(1, int(diag * expand_ratio))
+            dilate_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (expand_px * 2 + 1, expand_px * 2 + 1))
+            filled = cv2.dilate(filled, dilate_kernel, iterations=1)
+
     return filled
