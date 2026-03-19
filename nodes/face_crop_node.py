@@ -46,6 +46,11 @@ class ReFaceCrop:
                     "default": "#000000",
                     "tooltip": "Hex color for background when mode is 'color' (e.g. #000000).",
                 }),
+                "prompt": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": "Optional prompt text associated with this face, passed through to LoopStart.",
+                }),
                 "debug": ("BOOLEAN", {"default": False}),
             },
         }
@@ -55,7 +60,7 @@ class ReFaceCrop:
     FUNCTION = "execute"
     CATEGORY = "ReFace"
 
-    def execute(self, image, bbox_expand_ratio, min_bbox_ratio, background_mode, background_color, debug=False):
+    def execute(self, image, bbox_expand_ratio, min_bbox_ratio, background_mode, background_color, prompt="", debug=False):
         # image: [B, H, W, C] float32 0-1, process first frame
         img_tensor = image[0]  # [H, W, C]
         img_np = (img_tensor.cpu().numpy() * 255).astype(np.uint8)  # RGB uint8
@@ -154,6 +159,7 @@ class ReFaceCrop:
             "face": out_tensor,
             "detected": True,
             "embedding": embedding,
+            "prompt": prompt,
         }
 
         debug_img = self._build_debug_image(img_np, humans, instance_mask, head_mask, (cx, cy)) if debug else None

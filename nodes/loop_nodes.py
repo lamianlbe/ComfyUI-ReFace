@@ -104,10 +104,10 @@ class ReFaceLoopStart:
 
     RETURN_TYPES = ("FLOW_CONTROL", "REFACE_LOOP_CTX",
                     "IMAGE", "MASK",
-                    "IMAGE", "BOOLEAN")
+                    "IMAGE", "STRING", "BOOLEAN")
     RETURN_NAMES = ("flow", "loop_ctx",
                     "dst_head_image", "dst_head_mask",
-                    "src_face_image", "has_data")
+                    "src_face_image", "src_prompt", "has_data")
     FUNCTION = "execute"
     CATEGORY = "ReFace"
 
@@ -152,12 +152,13 @@ class ReFaceLoopStart:
             crop_mask.astype(np.float32) / 255.0
         ).unsqueeze(0)  # (1, h, w)
 
-        # Src face image
+        # Src face image and prompt
         src_face_image = item["src_face"]["face"]  # IMAGE tensor
+        src_prompt = item["src_face"].get("prompt", "")
 
         return ("stub", ctx,
                 dst_head_image, mask_tensor,
-                src_face_image, True)
+                src_face_image, src_prompt, True)
 
     # ── internals ─────────────────────────────────────────────────────────
 
@@ -180,7 +181,7 @@ class ReFaceLoopStart:
         blocker = ExecutionBlocker(None)
         return ("stub", ctx,
                 blocker, blocker,          # dst_head_image, dst_head_mask
-                blocker, False)            # src_face_image, has_data
+                blocker, blocker, False)   # src_face_image, src_prompt, has_data
 
     # ── heavy preprocessing (runs once) ───────────────────────────────────
 
