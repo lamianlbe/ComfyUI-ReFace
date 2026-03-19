@@ -42,15 +42,16 @@ class ReFaceCrop:
                     "default": "#000000",
                     "tooltip": "Hex color for background when mode is 'color' (e.g. #000000).",
                 }),
+                "debug": ("BOOLEAN", {"default": False}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "BOOLEAN", "REFACE_EMBEDDING")
-    RETURN_NAMES = ("face", "detected", "embedding")
+    RETURN_TYPES = ("IMAGE", "BOOLEAN", "REFACE_EMBEDDING", "IMAGE")
+    RETURN_NAMES = ("face", "detected", "embedding", "debug_image")
     FUNCTION = "execute"
     CATEGORY = "ReFace"
 
-    def execute(self, image, bbox_expand_pixels, min_bbox_ratio, background_mode, background_color):
+    def execute(self, image, bbox_expand_pixels, min_bbox_ratio, background_mode, background_color, debug=False):
         # image: [B, H, W, C] float32 0-1, process first frame
         img_tensor = image[0]  # [H, W, C]
         img_np = (img_tensor.cpu().numpy() * 255).astype(np.uint8)  # RGB uint8
@@ -68,7 +69,8 @@ class ReFaceCrop:
         face_info = detect_largest_face(img_bgr)
 
         if face_info is None:
-            return self._empty_result()
+            debug_img = self._build_debug_image(img_np, humans, None, None, None) if debug else None
+            return self._empty_result(debug_img)
 
         cx, cy = face_info["center"]
         self._last_embedding = face_info.get("embedding", None)
@@ -87,14 +89,15 @@ class ReFaceCrop:
 
         head_mask = parse_head_mask(img_np, instance_mask=instance_mask)  # (H, W) uint8
 
-        # ── Step 5: Fill holes (done inside parse_head_mask via _fill_holes) ──
+        # ── Step 5: Fill holes ──
         from ..core.face_parser import _fill_holes
         head_mask = _fill_holes(head_mask)
 
         # ── Step 6: Compute bbox with expansion ──
         ys, xs = np.where(head_mask > 0)
         if len(ys) == 0:
-            return self._empty_result()
+            debug_img = self._build_debug_image(img_np, humans, instance_mask, head_mask, (cx, cy)) if debug else None
+            return self._empty_result(debug_img)
 
         mask_x1, mask_y1 = int(xs.min()), int(ys.min())
         mask_x2, mask_y2 = int(xs.max()), int(ys.max())
@@ -111,7 +114,8 @@ class ReFaceCrop:
         bbox_area = width * height
         image_area = W * H
         if bbox_area / image_area < min_bbox_ratio:
-            return self._empty_result()
+            debug_img = self._build_debug_image(img_np, humans, instance_mask, head_mask, (cx, cy)) if debug else None
+            return self._empty_result(debug_img)
 
         # ── Crop and apply mask ──
         crop_rgb = img_np[top:bottom, left:right].copy()
@@ -131,12 +135,63 @@ class ReFaceCrop:
         out_tensor = torch.from_numpy(out_np).unsqueeze(0)  # [1, H, W, C]
         embedding = getattr(self, "_last_embedding", None)
 
-        return (out_tensor, True, embedding)
+        debug_img = self._build_debug_image(img_np, humans, instance_mask, head_mask, (cx, cy)) if debug else None
+        return (out_tensor, True, embedding, debug_img)
 
     @staticmethod
-    def _empty_result():
+    def _empty_result(debug_img=None):
         empty = torch.zeros(1, 1, 1, 3, dtype=torch.float32)
-        return (empty, False, None)
+        return (empty, False, None, debug_img)
+
+    @staticmethod
+    def _build_debug_image(img_np, humans, instance_mask, head_mask, face_center):
+        """Build debug visualization: original + YOLO masks (blue) + BiSeNet head mask (red) + face center (green dot)."""
+        import cv2
+
+        canvas = img_np.astype(np.float32).copy()
+        H, W = canvas.shape[:2]
+
+        # Overlay all YOLO human instance masks in blue (semi-transparent)
+        if humans:
+            for human in humans:
+                m = human["mask"]
+                if m.dtype == bool:
+                    m = m.astype(np.uint8) * 255
+                blue_overlay = np.zeros((H, W, 3), dtype=np.float32)
+                blue_overlay[:, :, 2] = 255.0  # Blue channel
+                alpha = (m > 0).astype(np.float32) * 0.35
+                for c in range(3):
+                    canvas[:, :, c] = canvas[:, :, c] * (1 - alpha) + blue_overlay[:, :, c] * alpha
+
+        # Overlay selected instance mask border in cyan
+        if instance_mask is not None:
+            inst = instance_mask.astype(np.uint8)
+            if inst.max() == 1:
+                inst = inst * 255
+            contours, _ = cv2.findContours(inst, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            canvas_u8 = np.clip(canvas, 0, 255).astype(np.uint8)
+            cv2.drawContours(canvas_u8, contours, -1, (0, 255, 255), 2)  # Cyan border
+            canvas = canvas_u8.astype(np.float32)
+
+        # Overlay BiSeNet head mask in red (semi-transparent)
+        if head_mask is not None:
+            red_overlay = np.zeros((H, W, 3), dtype=np.float32)
+            red_overlay[:, :, 0] = 255.0  # Red channel
+            alpha = (head_mask > 0).astype(np.float32) * 0.4
+            for c in range(3):
+                canvas[:, :, c] = canvas[:, :, c] * (1 - alpha) + red_overlay[:, :, c] * alpha
+
+        # Draw face center as green circle
+        if face_center is not None:
+            cx, cy = int(face_center[0]), int(face_center[1])
+            canvas_u8 = np.clip(canvas, 0, 255).astype(np.uint8)
+            radius = max(8, min(H, W) // 80)
+            cv2.circle(canvas_u8, (cx, cy), radius, (0, 255, 0), -1)  # Filled green
+            cv2.circle(canvas_u8, (cx, cy), radius, (255, 255, 255), 2)  # White border
+            canvas = canvas_u8.astype(np.float32)
+
+        out = np.clip(canvas, 0, 255).astype(np.float32) / 255.0
+        return torch.from_numpy(out).unsqueeze(0)  # [1, H, W, 3]
 
     @staticmethod
     def _parse_hex_color(hex_str: str):
