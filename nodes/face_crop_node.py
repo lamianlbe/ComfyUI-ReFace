@@ -122,7 +122,10 @@ class ReFaceCrop:
         crop_mask = head_mask[top:bottom, left:right]
         mask_bool = crop_mask > 0
 
-        if background_mode == "transparent":
+        if debug:
+            # Debug mode: skip background processing, output raw crop
+            out_np = crop_rgb.astype(np.float32) / 255.0
+        elif background_mode == "transparent":
             crop_rgba = np.zeros((height, width, 4), dtype=np.uint8)
             crop_rgba[:, :, :3] = crop_rgb
             crop_rgba[:, :, 3] = crop_mask  # 0 or 255
