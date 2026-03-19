@@ -28,7 +28,8 @@ SCHP_INPUT_SIZE = [512, 512]
 _parser_model = None
 _device = None
 
-SCHP_MODEL_NAME = "schp_pascal_person_part.pth"
+SCHP_MODEL_DIR = "schp"
+SCHP_MODEL_NAME = "exp-schp-201908270938-pascal-person-part.pth"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -385,8 +386,7 @@ def get_face_parser():
     if _parser_model is not None:
         return _parser_model
 
-    model_dir = _get_model_dir()
-    os.makedirs(model_dir, exist_ok=True)
+    model_dir = os.path.join(folder_paths.models_dir, SCHP_MODEL_DIR)
     model_path = os.path.join(model_dir, SCHP_MODEL_NAME)
 
     if not os.path.isfile(model_path):
@@ -394,7 +394,7 @@ def get_face_parser():
             f"[ReFace] SCHP Pascal-Person-Part model not found at {model_path}.\n"
             f"Please download it from:\n"
             f"  https://drive.google.com/file/d/1E5YwNKW2VOEayK9mWCS3Kpsxf-3z04ZE/view\n"
-            f"Rename to '{SCHP_MODEL_NAME}' and place in {model_dir}/"
+            f"Place as {model_path}"
         )
 
     device = _get_device()
