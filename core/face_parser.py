@@ -411,7 +411,7 @@ def get_face_parser():
         name = k[7:] if k.startswith("module.") else k
         new_state_dict[name] = v
 
-    net.load_state_dict(new_state_dict)
+    net.load_state_dict(new_state_dict, strict=False)
     net.to(device)
     net.eval()
 
