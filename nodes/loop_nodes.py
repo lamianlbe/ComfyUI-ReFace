@@ -106,11 +106,9 @@ class ReFaceLoopStart:
 
     RETURN_TYPES = ("FLOW_CONTROL", "REFACE_LOOP_CTX", "IMAGE",
                     "IMAGE", "MASK",
-                    "INT", "INT", "INT", "INT",
                     "IMAGE", "BOOLEAN")
     RETURN_NAMES = ("flow", "loop_ctx", "dst_image",
                     "dst_head_image", "dst_head_mask",
-                    "bbox_left", "bbox_top", "bbox_width", "bbox_height",
                     "src_face_image", "has_data")
     FUNCTION = "execute"
     CATEGORY = "ReFace"
@@ -146,7 +144,6 @@ class ReFaceLoopStart:
         bbox = item["dst_head_bbox"]
         left, top = bbox["left"], bbox["top"]
         right, bottom = bbox["right"], bbox["bottom"]
-        width, height = bbox["width"], bbox["height"]
 
         # Crop head image from the *running* dst_image
         img_hw = current_dst[0]  # (H, W, C)
@@ -164,7 +161,6 @@ class ReFaceLoopStart:
 
         return ("stub", ctx, current_dst,
                 dst_head_image, mask_tensor,
-                left, top, width, height,
                 src_face_image, True)
 
     # ── internals ─────────────────────────────────────────────────────────
@@ -188,7 +184,6 @@ class ReFaceLoopStart:
         blocker = ExecutionBlocker(None)
         return ("stub", ctx, dst_image,
                 blocker, blocker,          # dst_head_image, dst_head_mask
-                0, 0, 0, 0,
                 blocker, False)            # src_face_image, has_data
 
     # ── heavy preprocessing (runs once) ───────────────────────────────────
