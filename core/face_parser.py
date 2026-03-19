@@ -1,14 +1,12 @@
 """SCHP (Self-Correction Human Parsing) for head segmentation.
 
-Uses the SCHP model with LIP dataset for full-body head parsing.
-Model: exp-schp-201908261155-lip.pth
+Uses the SCHP model with Pascal-Person-Part dataset for head parsing.
+Model: exp-schp-201908270938-pascal-person-part.pth
 From: https://github.com/GoGoDuck912/Self-Correction-Human-Parsing
 
-LIP label map (20 classes):
-  0: Background, 1: Hat, 2: Hair, 3: Glove, 4: Sunglasses,
-  5: Upper-clothes, 6: Dress, 7: Coat, 8: Socks, 9: Pants,
-  10: Jumpsuits, 11: Scarf, 12: Skirt, 13: Face, 14: Left-arm,
-  15: Right-arm, 16: Left-leg, 17: Right-leg, 18: Left-shoe, 19: Right-shoe
+Pascal-Person-Part label map (7 classes):
+  0: Background, 1: Head, 2: Torso, 3: Upper Arms, 4: Lower Arms,
+  5: Upper Legs, 6: Lower Legs
 """
 
 import os
@@ -23,24 +21,15 @@ from collections import OrderedDict
 
 import folder_paths
 
-# Head labels in LIP: Hat(1) + Hair(2) + Sunglasses(4) + Face(13)
-LIP_HEAD_LABELS = {1, 2, 4, 13}
-LIP_INPUT_SIZE = [473, 473]
-LIP_NUM_CLASSES = 20
-
 # Head label in Pascal-Person-Part: Head(1)
 PASCAL_HEAD_LABELS = {1}
 PASCAL_INPUT_SIZE = [512, 512]
 PASCAL_NUM_CLASSES = 7
 
-_lip_model = None
 _pascal_model = None
 _device = None
 
-SCHP_MODEL_DIR = "reface"
-LIP_MODEL_NAME = "exp-schp-201908261155-lip.pth"
-
-SCHP_MODEL_DIR2 = "schp"
+SCHP_MODEL_DIR = "schp"
 PASCAL_MODEL_NAME = "exp-schp-201908270938-pascal-person-part.pth"
 
 
@@ -341,22 +330,12 @@ def _load_schp_model(model_dir, model_name, num_classes, label):
     return net
 
 
-def get_lip_model():
-    """Get or create singleton SCHP LIP model."""
-    global _lip_model
-    if _lip_model is None:
-        _lip_model = _load_schp_model(
-            os.path.join(folder_paths.models_dir, SCHP_MODEL_DIR),
-            LIP_MODEL_NAME, LIP_NUM_CLASSES, "LIP")
-    return _lip_model
-
-
 def get_pascal_model():
     """Get or create singleton SCHP Pascal model."""
     global _pascal_model
     if _pascal_model is None:
         _pascal_model = _load_schp_model(
-            os.path.join(folder_paths.models_dir, SCHP_MODEL_DIR2),
+            os.path.join(folder_paths.models_dir, SCHP_MODEL_DIR),
             PASCAL_MODEL_NAME, PASCAL_NUM_CLASSES, "Pascal")
     return _pascal_model
 
@@ -399,14 +378,12 @@ def parse_head_mask(
     image_rgb: np.ndarray,
     instance_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Parse image and return binary head mask using SCHP LIP ∪ Pascal.
+    """Parse image and return binary head mask using SCHP Pascal.
 
     Pipeline:
-      1. SCHP LIP → Hat(1) + Hair(2) + Sunglasses(4) + Face(13)
-      2. SCHP Pascal → Head(1)
-      3. Union of both masks
-      4. Intersect with YOLO instance mask (if provided)
-      5. Caller should run _fill_holes() on the result
+      1. SCHP Pascal → Head(1)
+      2. Intersect with YOLO instance mask (if provided)
+      3. Caller should run _fill_holes() on the result
 
     Args:
         image_rgb: RGB image (H, W, 3), uint8.
@@ -415,14 +392,7 @@ def parse_head_mask(
     Returns:
         Binary mask (H, W), uint8, 0 or 255.
     """
-    h, w = image_rgb.shape[:2]
-
-    # Run both models
-    lip_mask = _run_schp(get_lip_model(), image_rgb, LIP_INPUT_SIZE, LIP_HEAD_LABELS)
-    pascal_mask = _run_schp(get_pascal_model(), image_rgb, PASCAL_INPUT_SIZE, PASCAL_HEAD_LABELS)
-
-    # Union
-    head_mask = np.maximum(lip_mask, pascal_mask)
+    head_mask = _run_schp(get_pascal_model(), image_rgb, PASCAL_INPUT_SIZE, PASCAL_HEAD_LABELS)
 
     # Intersect with YOLO instance mask
     if instance_mask is not None:
