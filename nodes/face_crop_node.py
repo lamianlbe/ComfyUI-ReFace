@@ -4,7 +4,7 @@ Pipeline:
   1. YOLO26x-seg human instance segmentation
   2. InsightFace largest face detection
   3. Find the human instance containing the face center
-  4. BiSeNet head parsing constrained to that instance
+  4. SCHP Pascal head parsing constrained to that instance
   5. Fill holes in the head mask
   6. Compute bbox with configurable expansion
   7. Size threshold check
@@ -15,7 +15,11 @@ import torch
 
 
 class ReFaceCrop:
-    """Detect the largest face, segment the head within its person instance, and crop."""
+    """Detect the largest face, segment the head within its person instance, and crop.
+
+    Returns a REFACE_DETECTION struct that can be directly connected to ReFaceLoopStart.
+    Also returns a debug_image for visualization.
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -46,8 +50,8 @@ class ReFaceCrop:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "BOOLEAN", "REFACE_EMBEDDING", "IMAGE")
-    RETURN_NAMES = ("face", "detected", "embedding", "debug_image")
+    RETURN_TYPES = ("REFACE_DETECTION", "IMAGE")
+    RETURN_NAMES = ("detection", "debug_image")
     FUNCTION = "execute"
     CATEGORY = "ReFace"
 
@@ -73,7 +77,6 @@ class ReFaceCrop:
             return self._empty_result(debug_img)
 
         cx, cy = face_info["center"]
-        self._last_embedding = face_info.get("embedding", None)
 
         # ── Step 3: Find human instance containing the face center ──
         from ..core.human_segmentor import find_human_containing_point
@@ -145,19 +148,24 @@ class ReFaceCrop:
             out_np = crop_rgb.astype(np.float32) / 255.0
 
         out_tensor = torch.from_numpy(out_np).unsqueeze(0)  # [1, H, W, C]
-        embedding = getattr(self, "_last_embedding", None)
+        embedding = face_info.get("embedding", None)
+
+        detection = {
+            "face": out_tensor,
+            "detected": True,
+            "embedding": embedding,
+        }
 
         debug_img = self._build_debug_image(img_np, humans, instance_mask, head_mask, (cx, cy)) if debug else None
-        return (out_tensor, True, embedding, debug_img)
+        return (detection, debug_img)
 
     @staticmethod
     def _empty_result(debug_img=None):
-        empty = torch.zeros(1, 1, 1, 3, dtype=torch.float32)
-        return (empty, False, None, debug_img)
+        return (None, debug_img)
 
     @staticmethod
     def _build_debug_image(img_np, humans, instance_mask, head_mask, face_center):
-        """Build debug visualization: original + YOLO masks (blue) + BiSeNet head mask (red) + face center (green dot)."""
+        """Build debug visualization: original + YOLO masks (blue) + head mask (red) + face center (green dot)."""
         import cv2
 
         canvas = img_np.astype(np.float32).copy()
@@ -185,7 +193,7 @@ class ReFaceCrop:
             cv2.drawContours(canvas_u8, contours, -1, (0, 255, 255), 2)  # Cyan border
             canvas = canvas_u8.astype(np.float32)
 
-        # Overlay BiSeNet head mask in red (semi-transparent)
+        # Overlay head mask in red (semi-transparent)
         if head_mask is not None:
             red_overlay = np.zeros((H, W, 3), dtype=np.float32)
             red_overlay[:, :, 0] = 255.0  # Red channel
@@ -216,47 +224,10 @@ class ReFaceCrop:
             return (0, 0, 0)
 
 
-class ReFacePackDetection:
-    """Pack all ReFace Crop Head outputs into a single REFACE_DETECTION struct.
-
-    Outputs None if detected is False.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "face": ("IMAGE",),
-                "detected": ("BOOLEAN", {"forceInput": True}),
-            },
-            "optional": {
-                "embedding": ("REFACE_EMBEDDING",),
-            },
-        }
-
-    RETURN_TYPES = ("REFACE_DETECTION",)
-    RETURN_NAMES = ("detection",)
-    FUNCTION = "execute"
-    CATEGORY = "ReFace"
-
-    def execute(self, face, detected, embedding=None):
-        if not detected:
-            return (None,)
-
-        detection = {
-            "face": face,
-            "detected": True,
-            "embedding": embedding,
-        }
-        return (detection,)
-
-
 NODE_CLASS_MAPPINGS = {
     "ReFaceCrop": ReFaceCrop,
-    "ReFacePackDetection": ReFacePackDetection,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ReFaceCrop": "ReFace Crop Head",
-    "ReFacePackDetection": "Pack ReFace Detection",
 }
