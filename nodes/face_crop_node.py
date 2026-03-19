@@ -89,9 +89,9 @@ class ReFaceCrop:
 
         head_mask = parse_head_mask(img_np, instance_mask=instance_mask)  # (H, W) uint8
 
-        # ── Step 5: Fill holes ──
+        # ── Step 5: Fill holes (no expansion in this node) ──
         from ..core.face_parser import _fill_holes
-        head_mask = _fill_holes(head_mask)
+        head_mask = _fill_holes(head_mask, expand_ratio=0.0)
 
         # ── Step 6: Compute bbox with expansion ──
         ys, xs = np.where(head_mask > 0)
