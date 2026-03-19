@@ -24,16 +24,24 @@ from collections import OrderedDict
 import folder_paths
 
 # Head labels in LIP: Hat(1) + Hair(2) + Sunglasses(4) + Face(13)
-HEAD_LABELS = {1, 2, 4, 13}
+LIP_HEAD_LABELS = {1, 2, 4, 13}
+LIP_INPUT_SIZE = [473, 473]
+LIP_NUM_CLASSES = 20
 
-SCHP_INPUT_SIZE = [473, 473]
-SCHP_NUM_CLASSES = 20
+# Head label in Pascal-Person-Part: Head(1)
+PASCAL_HEAD_LABELS = {1}
+PASCAL_INPUT_SIZE = [512, 512]
+PASCAL_NUM_CLASSES = 7
 
-_parser_model = None
+_lip_model = None
+_pascal_model = None
 _device = None
 
 SCHP_MODEL_DIR = "reface"
-SCHP_MODEL_NAME = "exp-schp-201908261155-lip.pth"
+LIP_MODEL_NAME = "exp-schp-201908261155-lip.pth"
+
+SCHP_MODEL_DIR2 = "schp"
+PASCAL_MODEL_NAME = "exp-schp-201908270938-pascal-person-part.pth"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -306,24 +314,16 @@ def _get_device():
     return _device
 
 
-def get_face_parser():
-    """Get or create singleton SCHP face parser."""
-    global _parser_model
-    if _parser_model is not None:
-        return _parser_model
-
-    model_dir = os.path.join(folder_paths.models_dir, SCHP_MODEL_DIR)
-    model_path = os.path.join(model_dir, SCHP_MODEL_NAME)
-
+def _load_schp_model(model_dir, model_name, num_classes, label):
+    """Load a SCHP model from disk."""
+    model_path = os.path.join(model_dir, model_name)
     if not os.path.isfile(model_path):
         raise FileNotFoundError(
-            f"[ReFace] SCHP LIP model not found at {model_path}.\n"
-            f"Please download from:\n"
-            f"  https://drive.google.com/file/d/1k4dllHpu0bdx38J7H28rVVLpU-kOHmnH/view\n"
-            f"Place as {model_path}")
+            f"[ReFace] SCHP {label} model not found at {model_path}.\n"
+            f"Please download and place as {model_path}")
 
     device = _get_device()
-    net = ResNet(Bottleneck, [3, 4, 23, 3], SCHP_NUM_CLASSES)
+    net = ResNet(Bottleneck, [3, 4, 23, 3], num_classes)
 
     state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
     if 'state_dict' in state_dict:
@@ -337,9 +337,28 @@ def get_face_parser():
     net.to(device)
     net.eval()
 
-    _parser_model = net
-    print(f"[ReFace] SCHP LIP model loaded on {device}")
-    return _parser_model
+    print(f"[ReFace] SCHP {label} model loaded on {device}")
+    return net
+
+
+def get_lip_model():
+    """Get or create singleton SCHP LIP model."""
+    global _lip_model
+    if _lip_model is None:
+        _lip_model = _load_schp_model(
+            os.path.join(folder_paths.models_dir, SCHP_MODEL_DIR),
+            LIP_MODEL_NAME, LIP_NUM_CLASSES, "LIP")
+    return _lip_model
+
+
+def get_pascal_model():
+    """Get or create singleton SCHP Pascal model."""
+    global _pascal_model
+    if _pascal_model is None:
+        _pascal_model = _load_schp_model(
+            os.path.join(folder_paths.models_dir, SCHP_MODEL_DIR2),
+            PASCAL_MODEL_NAME, PASCAL_NUM_CLASSES, "Pascal")
+    return _pascal_model
 
 
 _schp_transform = transforms.Compose([
@@ -348,16 +367,46 @@ _schp_transform = transforms.Compose([
 ])
 
 
+def _run_schp(model, image_rgb, input_size, head_labels):
+    """Run a single SCHP model and return head mask."""
+    device = _get_device()
+    h, w = image_rgb.shape[:2]
+
+    center, scale = _xywh2cs(0, 0, w - 1, h - 1, input_size)
+    trans = _get_affine_transform(center, scale, 0, input_size)
+    input_img = cv2.warpAffine(
+        image_rgb, trans, (input_size[1], input_size[0]),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+
+    tensor = _schp_transform(input_img).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        output = model(tensor)
+
+    upsample = nn.Upsample(size=input_size, mode='bilinear', align_corners=True)
+    logits = upsample(output[0][-1][0].unsqueeze(0)).squeeze(0).permute(1, 2, 0)
+    logits = _transform_logits(logits.cpu().numpy(), center, scale, w, h,
+                               input_size=input_size)
+    parsing = np.argmax(logits, axis=2)
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for label in head_labels:
+        mask[parsing == label] = 255
+    return mask
+
+
 def parse_head_mask(
     image_rgb: np.ndarray,
     instance_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Parse image and return binary head mask using SCHP LIP.
+    """Parse image and return binary head mask using SCHP LIP ∪ Pascal.
 
     Pipeline:
-      1. SCHP LIP → Hat(1) + Hair(2) + Sunglasses(4) + Face(13) mask
-      2. Intersect with YOLO instance mask (if provided)
-      3. Caller should run _fill_holes() on the result
+      1. SCHP LIP → Hat(1) + Hair(2) + Sunglasses(4) + Face(13)
+      2. SCHP Pascal → Head(1)
+      3. Union of both masks
+      4. Intersect with YOLO instance mask (if provided)
+      5. Caller should run _fill_holes() on the result
 
     Args:
         image_rgb: RGB image (H, W, 3), uint8.
@@ -366,33 +415,14 @@ def parse_head_mask(
     Returns:
         Binary mask (H, W), uint8, 0 or 255.
     """
-    model = get_face_parser()
-    device = _get_device()
     h, w = image_rgb.shape[:2]
 
-    # SCHP affine preprocessing
-    center, scale = _xywh2cs(0, 0, w - 1, h - 1, SCHP_INPUT_SIZE)
-    trans = _get_affine_transform(center, scale, 0, SCHP_INPUT_SIZE)
-    input_img = cv2.warpAffine(
-        image_rgb, trans, (SCHP_INPUT_SIZE[1], SCHP_INPUT_SIZE[0]),
-        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+    # Run both models
+    lip_mask = _run_schp(get_lip_model(), image_rgb, LIP_INPUT_SIZE, LIP_HEAD_LABELS)
+    pascal_mask = _run_schp(get_pascal_model(), image_rgb, PASCAL_INPUT_SIZE, PASCAL_HEAD_LABELS)
 
-    tensor = _schp_transform(input_img).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        output = model(tensor)
-
-    # Fusion result → upsample → inverse affine → argmax
-    upsample = nn.Upsample(size=SCHP_INPUT_SIZE, mode='bilinear', align_corners=True)
-    logits = upsample(output[0][-1][0].unsqueeze(0)).squeeze(0).permute(1, 2, 0)
-    logits = _transform_logits(logits.cpu().numpy(), center, scale, w, h,
-                               input_size=SCHP_INPUT_SIZE)
-    parsing = np.argmax(logits, axis=2)
-
-    # Head mask: Hat(1) + Hair(2) + Sunglasses(4) + Face(13)
-    head_mask = np.zeros((h, w), dtype=np.uint8)
-    for label in HEAD_LABELS:
-        head_mask[parsing == label] = 255
+    # Union
+    head_mask = np.maximum(lip_mask, pascal_mask)
 
     # Intersect with YOLO instance mask
     if instance_mask is not None:
