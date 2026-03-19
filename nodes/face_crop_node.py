@@ -22,12 +22,12 @@ class ReFaceCrop:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "bbox_expand_pixels": ("INT", {
-                    "default": 50,
-                    "min": 0,
-                    "max": 500,
-                    "step": 1,
-                    "tooltip": "Number of pixels to expand the bounding box outward on each side.",
+                "bbox_expand_ratio": ("FLOAT", {
+                    "default": 0.8,
+                    "min": 0.0,
+                    "max": 5.0,
+                    "step": 0.1,
+                    "tooltip": "Expand bbox outward by this multiple of the inter-eye distance.",
                 }),
                 "min_bbox_ratio": ("FLOAT", {
                     "default": 0.01,
@@ -51,7 +51,7 @@ class ReFaceCrop:
     FUNCTION = "execute"
     CATEGORY = "ReFace"
 
-    def execute(self, image, bbox_expand_pixels, min_bbox_ratio, background_mode, background_color, debug=False):
+    def execute(self, image, bbox_expand_ratio, min_bbox_ratio, background_mode, background_color, debug=False):
         # image: [B, H, W, C] float32 0-1, process first frame
         img_tensor = image[0]  # [H, W, C]
         img_np = (img_tensor.cpu().numpy() * 255).astype(np.uint8)  # RGB uint8
@@ -102,7 +102,16 @@ class ReFaceCrop:
         mask_x1, mask_y1 = int(xs.min()), int(ys.min())
         mask_x2, mask_y2 = int(xs.max()), int(ys.max())
 
-        pad = bbox_expand_pixels
+        # Compute expansion pixels from eye distance ratio
+        eye_dist = face_info.get("eye_dist")
+        if eye_dist is not None and eye_dist > 0:
+            pad = int(eye_dist * bbox_expand_ratio)
+        else:
+            # Fallback: use face bbox width as proxy (~2x eye distance)
+            face_bbox = face_info["bbox"]
+            face_w = face_bbox[2] - face_bbox[0]
+            pad = int(face_w * bbox_expand_ratio * 0.5)
+
         left = max(0, mask_x1 - pad)
         top = max(0, mask_y1 - pad)
         right = min(W, mask_x2 + 1 + pad)

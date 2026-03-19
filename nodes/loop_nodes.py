@@ -82,9 +82,9 @@ class ReFaceLoopStart:
         inputs = {
             "required": {
                 "dst_image": ("IMAGE",),
-                "bbox_expand_pixels": ("INT", {
-                    "default": 50, "min": 0, "max": 500, "step": 1,
-                    "tooltip": "Pixels to expand the head bounding box on each side.",
+                "bbox_expand_ratio": ("FLOAT", {
+                    "default": 0.8, "min": 0.0, "max": 5.0, "step": 0.1,
+                    "tooltip": "Expand bbox by this multiple of inter-eye distance.",
                 }),
                 "min_bbox_ratio": ("FLOAT", {
                     "default": 0.01, "min": 0.0, "max": 1.0, "step": 0.001,
@@ -113,7 +113,7 @@ class ReFaceLoopStart:
 
     # ── public entry point ────────────────────────────────────────────────
 
-    def execute(self, dst_image, bbox_expand_pixels, min_bbox_ratio, **kwargs):
+    def execute(self, dst_image, bbox_expand_ratio, min_bbox_ratio, **kwargs):
         loop_ctx = kwargs.get("_loop_ctx", None)
 
         if loop_ctx is None:
@@ -123,7 +123,7 @@ class ReFaceLoopStart:
                 ctx = {"items": [], "current_index": 0, "dst_image": dst_image}
             else:
                 ctx = self._preprocess(dst_image, src_faces,
-                                       bbox_expand_pixels, min_bbox_ratio)
+                                       bbox_expand_ratio, min_bbox_ratio)
         else:
             # ── Subsequent iteration: reuse context ──
             ctx = loop_ctx
@@ -184,7 +184,7 @@ class ReFaceLoopStart:
 
     # ── heavy preprocessing (runs once) ───────────────────────────────────
 
-    def _preprocess(self, dst_image, src_faces, bbox_expand_pixels, min_bbox_ratio):
+    def _preprocess(self, dst_image, src_faces, bbox_expand_ratio, min_bbox_ratio):
         img_tensor = dst_image[0]  # (H, W, C)
         img_np = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
         H, W = img_np.shape[:2]
@@ -256,7 +256,16 @@ class ReFaceLoopStart:
             mask_x1, mask_y1 = int(xs.min()), int(ys.min())
             mask_x2, mask_y2 = int(xs.max()), int(ys.max())
 
-            pad = bbox_expand_pixels
+            # Compute expansion pixels from eye distance ratio
+            eye_dist = dst_face.get("eye_dist")
+            if eye_dist is not None and eye_dist > 0:
+                pad = int(eye_dist * bbox_expand_ratio)
+            else:
+                # Fallback: use face bbox width as proxy (~2x eye distance)
+                face_bbox = dst_face["bbox"]
+                face_w = face_bbox[2] - face_bbox[0]
+                pad = int(face_w * bbox_expand_ratio * 0.5)
+
             left = max(0, mask_x1 - pad)
             top_  = max(0, mask_y1 - pad)
             right = min(W, mask_x2 + 1 + pad)

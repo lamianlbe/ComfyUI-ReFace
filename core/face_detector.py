@@ -60,11 +60,20 @@ def _face_to_dict(face):
     if embedding is None:
         embedding = getattr(face, "embedding", None)
 
+    # Compute inter-eye distance from landmarks
+    # InsightFace kps: [left_eye, right_eye, nose, left_mouth, right_mouth]
+    eye_dist = None
+    kps = getattr(face, "kps", None)
+    if kps is not None and len(kps) >= 2:
+        le, re = kps[0], kps[1]
+        eye_dist = float(np.sqrt((le[0] - re[0]) ** 2 + (le[1] - re[1]) ** 2))
+
     return {
         "bbox": (float(x1), float(y1), float(x2), float(y2)),
         "center": (float(cx), float(cy)),
         "area": float(area),
         "embedding": embedding,
+        "eye_dist": eye_dist,
     }
 
 
