@@ -45,8 +45,8 @@ class ReFaceCrop:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "INT", "INT", "INT", "INT", "INT", "BOOLEAN", "REFACE_EMBEDDING")
-    RETURN_NAMES = ("face", "left", "top", "width", "height", "right", "bottom", "detected", "embedding")
+    RETURN_TYPES = ("IMAGE", "BOOLEAN", "REFACE_EMBEDDING")
+    RETURN_NAMES = ("face", "detected", "embedding")
     FUNCTION = "execute"
     CATEGORY = "ReFace"
 
@@ -131,12 +131,12 @@ class ReFaceCrop:
         out_tensor = torch.from_numpy(out_np).unsqueeze(0)  # [1, H, W, C]
         embedding = getattr(self, "_last_embedding", None)
 
-        return (out_tensor, left, top, width, height, right, bottom, True, embedding)
+        return (out_tensor, True, embedding)
 
     @staticmethod
     def _empty_result():
         empty = torch.zeros(1, 1, 1, 3, dtype=torch.float32)
-        return (empty, 0, 0, 0, 0, 0, 0, False, None)
+        return (empty, False, None)
 
     @staticmethod
     def _parse_hex_color(hex_str: str):
@@ -160,12 +160,6 @@ class ReFacePackDetection:
         return {
             "required": {
                 "face": ("IMAGE",),
-                "left": ("INT", {"forceInput": True}),
-                "top": ("INT", {"forceInput": True}),
-                "width": ("INT", {"forceInput": True}),
-                "height": ("INT", {"forceInput": True}),
-                "right": ("INT", {"forceInput": True}),
-                "bottom": ("INT", {"forceInput": True}),
                 "detected": ("BOOLEAN", {"forceInput": True}),
             },
             "optional": {
@@ -178,20 +172,12 @@ class ReFacePackDetection:
     FUNCTION = "execute"
     CATEGORY = "ReFace"
 
-    def execute(self, face, left, top, width, height, right, bottom, detected, embedding=None):
+    def execute(self, face, detected, embedding=None):
         if not detected:
             return (None,)
 
         detection = {
             "face": face,
-            "bbox": {
-                "left": left,
-                "top": top,
-                "width": width,
-                "height": height,
-                "right": right,
-                "bottom": bottom,
-            },
             "detected": True,
             "embedding": embedding,
         }
