@@ -267,6 +267,11 @@ def get_face_parser():
 
     net = BiSeNet(n_classes=19)
     state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+
+    # Strip "module." prefix if the model was saved with DataParallel
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {k.removeprefix("module."): v for k, v in state_dict.items()}
+
     net.load_state_dict(state_dict)
     net.to(device)
     net.eval()
