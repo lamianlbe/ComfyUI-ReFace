@@ -332,6 +332,83 @@ class ReFaceLoopStart:
 # ReFaceLoopEnd
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Color correction / blending helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _lab_color_transfer(src_rgb, ref_rgb, mask):
+    """Transfer color statistics from ref to src in Lab space, within the mask region.
+
+    Args:
+        src_rgb: Modified head region (H, W, 3) uint8 RGB.
+        ref_rgb: Original dst region (H, W, 3) uint8 RGB.
+        mask: Binary mask (H, W) uint8, 0 or 255.
+
+    Returns:
+        Color-corrected src (H, W, 3) uint8 RGB.
+    """
+    import cv2
+
+    src_lab = cv2.cvtColor(src_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    ref_lab = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    mask_bool = mask > 127
+
+    if mask_bool.sum() < 10:
+        return src_rgb
+
+    # Compute stats only within the mask
+    for ch in range(3):
+        src_ch = src_lab[:, :, ch]
+        ref_ch = ref_lab[:, :, ch]
+        src_mean = src_ch[mask_bool].mean()
+        src_std = src_ch[mask_bool].std() + 1e-6
+        ref_mean = ref_ch[mask_bool].mean()
+        ref_std = ref_ch[mask_bool].std() + 1e-6
+
+        # Normalize src to ref stats
+        src_lab[:, :, ch] = (src_ch - src_mean) * (ref_std / src_std) + ref_mean
+
+    src_lab = np.clip(src_lab, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(src_lab, cv2.COLOR_LAB2RGB)
+
+
+def _poisson_blend(src_rgb, dst_rgb, mask):
+    """Poisson blending (seamless clone) of src onto dst using the mask.
+
+    Args:
+        src_rgb: Modified head region (H, W, 3) uint8 RGB.
+        dst_rgb: Original dst region (H, W, 3) uint8 RGB.
+        mask: Binary mask (H, W) uint8, 0 or 255.
+
+    Returns:
+        Blended result (H, W, 3) uint8 RGB.
+    """
+    import cv2
+
+    # seamlessClone works in BGR
+    src_bgr = cv2.cvtColor(src_rgb, cv2.COLOR_RGB2BGR)
+    dst_bgr = cv2.cvtColor(dst_rgb, cv2.COLOR_RGB2BGR)
+
+    # Find center of the mask for seamlessClone
+    ys, xs = np.where(mask > 127)
+    if len(ys) < 10:
+        return src_rgb
+
+    center = (int((xs.min() + xs.max()) // 2), int((ys.min() + ys.max()) // 2))
+
+    # Ensure mask is proper format (must be single channel, 255 for foreground)
+    mask_clone = (mask > 127).astype(np.uint8) * 255
+
+    try:
+        result_bgr = cv2.seamlessClone(src_bgr, dst_bgr, mask_clone, center,
+                                        cv2.NORMAL_CLONE)
+        return cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+    except cv2.error:
+        # Fallback to direct paste if seamlessClone fails
+        return src_rgb
+
+
 # Class types that should stop the upstream trace (other loop boundaries).
 _LOOP_END_CLASSES = frozenset([
     "ReFaceLoopEnd",
@@ -354,11 +431,14 @@ class ReFaceLoopEnd:
             "required": {
                 "flow": ("FLOW_CONTROL", {"rawLink": True}),
                 "loop_ctx": ("REFACE_LOOP_CTX",),
+                "blend_mode": (["direct", "poisson", "color_match"],
+                               {"default": "direct"}),
             },
             "optional": {
                 # Optional so that LoopEnd still executes when LoopStart
                 # blocks the processing pipeline (items array is empty).
                 "modified_head_image": ("IMAGE",),
+                "modified_head_mask": ("MASK",),
             },
             "hidden": {
                 "dynprompt": "DYNPROMPT",
@@ -373,8 +453,9 @@ class ReFaceLoopEnd:
 
     # ── public entry point ────────────────────────────────────────────────
 
-    def execute(self, flow, loop_ctx,
-                modified_head_image=None, dynprompt=None, unique_id=None):
+    def execute(self, flow, loop_ctx, blend_mode="direct",
+                modified_head_image=None, modified_head_mask=None,
+                dynprompt=None, unique_id=None):
         items = loop_ctx.get("items", [])
         idx = loop_ctx.get("current_index", 0)
         dst_image = loop_ctx["dst_image"]
@@ -384,7 +465,9 @@ class ReFaceLoopEnd:
             return (dst_image,)
 
         # ── Paste modified head back onto dst_image ──
-        updated_dst = self._paste_back(dst_image, modified_head_image, items[idx])
+        updated_dst = self._paste_back(
+            dst_image, modified_head_image, modified_head_mask,
+            items[idx], blend_mode)
 
         # ── Advance index and update dst_image in context ──
         new_ctx = dict(loop_ctx)
@@ -401,8 +484,11 @@ class ReFaceLoopEnd:
     # ── paste logic ───────────────────────────────────────────────────────
 
     @staticmethod
-    def _paste_back(dst_image, modified_head_image, item):
-        """Overwrite the bbox region in *dst_image* with *modified_head_image*."""
+    def _paste_back(dst_image, modified_head_image, modified_head_mask,
+                    item, blend_mode):
+        """Paste modified head back with optional color correction and mask blending."""
+        import cv2
+
         bbox = item["dst_head_bbox"]
         left, top = bbox["left"], bbox["top"]
         right, bottom = bbox["right"], bbox["bottom"]
@@ -412,7 +498,7 @@ class ReFaceLoopEnd:
         updated = dst_image.clone()
         mod = modified_head_image[0]  # (h, w, C)
 
-        # Resize if the user changed dimensions
+        # Resize modified image to target bbox size
         if mod.shape[0] != target_h or mod.shape[1] != target_w:
             mod = (
                 torch.nn.functional.interpolate(
@@ -435,7 +521,52 @@ class ReFaceLoopEnd:
                               dtype=mod.dtype, device=mod.device)
             mod = torch.cat([mod, pad], dim=2)
 
-        updated[0, top:bottom, left:right, :] = mod
+        # Resize mask to target bbox size (nearest interpolation)
+        mask_np = None
+        if modified_head_mask is not None:
+            mask_t = modified_head_mask[0]  # (h, w)
+            if mask_t.shape[0] != target_h or mask_t.shape[1] != target_w:
+                mask_t = (
+                    torch.nn.functional.interpolate(
+                        mask_t.unsqueeze(0).unsqueeze(0),
+                        size=(target_h, target_w),
+                        mode="nearest",
+                    )
+                    .squeeze(0)
+                    .squeeze(0)
+                )
+            mask_np = (mask_t.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+
+        # Convert to numpy uint8 for color correction / blending
+        dst_region = (updated[0, top:bottom, left:right, :].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        mod_np = (mod.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+
+        if blend_mode == "color_match" and mask_np is not None:
+            # Lab color transfer: match modified region's color stats to original
+            mod_np = _lab_color_transfer(mod_np, dst_region, mask_np)
+
+        if blend_mode == "poisson" and mask_np is not None:
+            # Poisson blending (seamless clone)
+            mod_np = _poisson_blend(mod_np, dst_region, mask_np)
+            # After poisson blend, result is already composited, paste directly
+            result = torch.from_numpy(mod_np.astype(np.float32) / 255.0).to(
+                dtype=updated.dtype, device=updated.device)
+            updated[0, top:bottom, left:right, :] = result
+            return updated
+
+        # Mask-based alpha blending (for direct & color_match modes)
+        if mask_np is not None:
+            alpha = mask_np.astype(np.float32) / 255.0  # (h, w) in [0, 1]
+            alpha_3d = alpha[:, :, np.newaxis]  # (h, w, 1)
+            blended = (mod_np.astype(np.float32) * alpha_3d +
+                       dst_region.astype(np.float32) * (1 - alpha_3d))
+            blended = blended.clip(0, 255).astype(np.uint8)
+        else:
+            blended = mod_np
+
+        result = torch.from_numpy(blended.astype(np.float32) / 255.0).to(
+            dtype=updated.dtype, device=updated.device)
+        updated[0, top:bottom, left:right, :] = result
         return updated
 
     # ── graph expansion (execution-inversion loop) ────────────────────────
