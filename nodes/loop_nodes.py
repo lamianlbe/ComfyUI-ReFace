@@ -174,14 +174,18 @@ class ReFaceLoopStart:
 
     @staticmethod
     def _empty_outputs(ctx):
-        """Return ExecutionBlocker for processing outputs so that nodes
-        between LoopStart and LoopEnd are skipped entirely.
-        Non-processing outputs (flow, loop_ctx) remain valid
-        so that LoopEnd can still execute and return dst_image as-is."""
-        blocker = ExecutionBlocker(None)
+        """Return 1x1 placeholder outputs when there are no items to process.
+
+        We do NOT use ExecutionBlocker here because it propagates through
+        the entire downstream chain and prevents LoopEnd from executing.
+        Instead we output tiny placeholders and has_data=False so the user
+        can skip processing. LoopEnd checks ctx["items"] and returns
+        dst_image unchanged when the list is empty."""
+        placeholder_img = torch.zeros(1, 1, 1, 3)   # (B, H, W, C)
+        placeholder_mask = torch.zeros(1, 1, 1)      # (B, H, W)
         return ("stub", ctx,
-                blocker, blocker,          # dst_head_image, dst_head_mask
-                blocker, blocker, False)   # src_face_image, src_prompt, has_data
+                placeholder_img, placeholder_mask,    # dst_head_image, dst_head_mask
+                placeholder_img, "", False)            # src_face_image, src_prompt, has_data
 
     # ── heavy preprocessing (runs once) ───────────────────────────────────
 
