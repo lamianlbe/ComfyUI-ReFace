@@ -1,0 +1,6 @@
+ultralytics>=8.3.0
+insightface>=0.7.3
+onnxruntime-gpu>=1.16.0
+opencv-python>=4.8.0
+numpy
+Pillow
