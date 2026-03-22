@@ -2,7 +2,7 @@
 
 Pipeline:
   1. YOLO26x-seg human instance segmentation
-  2. InsightFace largest face detection
+  2. YuNet largest face detection
   3. Find the human instance containing the face center
   4. SCHP Pascal head parsing constrained to that instance
   5. Fill holes in the head mask

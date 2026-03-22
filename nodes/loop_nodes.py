@@ -199,8 +199,8 @@ class ReFaceLoopStart:
         from ..core.human_segmentor import segment_humans, find_human_containing_point
         humans = segment_humans(img_np)
 
-        # ── Step 3: InsightFace detect all dst faces, sorted by area desc ──
-        from ..core.face_detector import detect_all_faces, compute_embedding_from_image
+        # ── Step 3: YuNet detect all dst faces, sorted by area desc ──
+        from ..core.face_detector import detect_all_faces, compute_embedding, compute_embedding_from_image
         dst_faces = detect_all_faces(img_bgr, max_count=len(src_faces))
         if not dst_faces:
             return {"items": [], "current_index": 0, "dst_image": dst_image}
@@ -213,6 +213,10 @@ class ReFaceLoopStart:
         if skip_arcface:
             matches = [(0, 0)]
         else:
+            # Compute dst embeddings via ArcFace (lazy-loaded)
+            for df in dst_faces:
+                df["embedding"] = compute_embedding(img_bgr, df)
+
             src_embeddings = []
             for sf in src_faces:
                 emb = sf.get("embedding", None)
